@@ -1,0 +1,9 @@
+[package]
+name = "cuite-reactive"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ahash.workspace = true
+self_cell.workspace = true
+slotmap.workspace = true
