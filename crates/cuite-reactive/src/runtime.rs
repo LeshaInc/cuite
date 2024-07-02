@@ -14,20 +14,76 @@ pub fn with_runtime<Ret>(func: impl FnOnce(&Runtime) -> Ret) -> Ret {
     RUNTIME.with(func)
 }
 
+/// Threaded local reactive runtime.
+///
+/// Manages the reactive nodes (signals, effects, scopes) and their lifetime.
+///
+/// The nodes have two kinds of relationships:
+///
+///  - [Source] - [Subscriber]. This forms a DAG of dependencies and updates.
+///
+///  - Parent - [Child]. This is a forest which determines the lifetime of
+///    nodes, their ownership, and handles cleanup.
 #[derive(Default)]
 pub struct Runtime {
+    /// Reactive nodes: signals, effects, scopes, etc
     pub nodes: RefCell<SlotMap<NodeId, Node>>,
+
+    /// Mapping between nodes and their subscribers.
+    ///
+    /// If node A is a subscriber of node B, then updates of B will also cause
+    /// an update of A.
     pub node_subscribers: RefCell<SecondaryMap<NodeId, RefCell<AHashSet<NodeId>>>>,
+
+    /// Mapping between nodes and their sources, i.e. dependencies.
+    ///
+    /// If A is a subscriber of B, then B is a source of A, and vice versa.
     pub node_sources: RefCell<SecondaryMap<NodeId, RefCell<AHashSet<NodeId>>>>,
+
+    /// Mapping between nodes and their parent. When parent is disposed, all of
+    /// the descendants in the hierarchy are also disposed.
+    pub node_parents: RefCell<SecondaryMap<NodeId, NodeId>>,
+
+    /// Mapping between nodes and their children.
+    ///
+    /// Reversed `node_parents` mapping.
+    pub node_children: RefCell<SecondaryMap<NodeId, RefCell<AHashSet<NodeId>>>>,
+
+    /// Current scope which will be implicitly assigned as a parent for all
+    /// nodes created under it.
+    pub scope: Cell<Option<NodeId>>,
+
+    /// Node that is currently being updated.
+    ///
+    /// When a node is tracked (for example, when getting a signal's value),
+    /// that node will be added to the sources of the current observer. And vice
+    /// versa: the observer will be added to the subscribers of the tracked
+    /// node.
     pub observer: Cell<Option<NodeId>>,
+
+    /// List of effects scheduled to be run during `run_effects`
     pub pending_effects: RefCell<Vec<NodeId>>,
 }
 
 impl Runtime {
+    /// Creates a node and assigns it to the current scope.
     pub fn create_node(&self, node: Node) -> NodeId {
-        self.nodes.borrow_mut().insert(node)
+        let id = self.nodes.borrow_mut().insert(node);
+
+        if let Some(scope) = self.scope.get() {
+            self.node_parents.borrow_mut().insert(id, scope);
+
+            let node_children = &mut self.node_children.borrow_mut();
+            let children = node_children.entry(id).map(|v| v.or_default());
+            if let Some(children) = children {
+                children.borrow_mut().insert(id);
+            }
+        }
+
+        id
     }
 
+    /// Creates a signal with a specified initial value.
     pub fn create_signal(&self, value: AnyValue) -> NodeId {
         self.create_node(Node {
             value: Some(value),
@@ -36,6 +92,10 @@ impl Runtime {
         })
     }
 
+    /// Creates an effect with a specified initial value and a computation.
+    ///
+    /// Note that the effect will not be run unless you call
+    /// `update_if_necessary`.
     pub fn create_effect(&self, value: AnyValue, computation: AnyComputation) -> NodeId {
         self.create_node(Node {
             value: Some(value),
@@ -44,21 +104,14 @@ impl Runtime {
         })
     }
 
-    fn get_node_value(&self, id: NodeId) -> Option<AnyValue> {
+    /// Returns the value of a node, if the node exists and has a value.
+    pub fn get_node_value(&self, id: NodeId) -> Option<AnyValue> {
         let nodes = self.nodes.borrow();
         let node = nodes.get(id)?;
         node.value.clone()
     }
 
-    pub fn with_value<Ret>(
-        &self,
-        id: NodeId,
-        func: impl FnOnce(AnyValue) -> Option<Ret>,
-    ) -> Option<Ret> {
-        self.get_node_value(id).and_then(func)
-    }
-
-    pub fn node_state(&self, id: NodeId) -> NodeState {
+    fn node_state(&self, id: NodeId) -> NodeState {
         let nodes = self.nodes.borrow();
         match nodes.get(id) {
             Some(node) => node.state,
@@ -66,13 +119,16 @@ impl Runtime {
         }
     }
 
-    pub fn mark_clean(&self, id: NodeId) {
+    fn mark_clean(&self, id: NodeId) {
         let mut nodes = self.nodes.borrow_mut();
         if let Some(node) = nodes.get_mut(id) {
             node.state = NodeState::Clean;
         }
     }
 
+    /// Marks the node dirty. All of its descendants in the subscriber hierarchy
+    /// are marked as check, i.e. they will be updated only if one of their
+    /// sources actually changes.
     pub fn mark_descendants_dirty(&self, root_id: NodeId) {
         let mut nodes = self.nodes.borrow_mut();
         let mut pending_effects = self.pending_effects.borrow_mut();
@@ -96,7 +152,8 @@ impl Runtime {
 
         // DFS using a stack of iterators
 
-        // define a self-referential struct for storing the iterator alongside the borrowed ref
+        // define a self-referential struct for storing the iterator alongside the
+        // borrowed ref
         type Dependent<'a> = hash_set::Iter<'a, NodeId>;
         self_cell::self_cell! {
             struct RefIter<'a> {
@@ -177,6 +234,7 @@ impl Runtime {
         }
     }
 
+    /// Runs all the pending effects.
     pub fn run_effects(&self) {
         let mut effects = self.pending_effects.take();
 
@@ -187,6 +245,12 @@ impl Runtime {
         *self.pending_effects.borrow_mut() = effects;
     }
 
+    /// Updates the node only if necessary.
+    ///
+    /// If it's marked as check, the sources will be recursively updated too.
+    ///
+    /// If it's marked as dirty, it will be updated regardless of the state of
+    /// the sources.
     pub fn update_if_necessary(&self, node_id: NodeId) {
         if self.node_state(node_id) == NodeState::Check {
             let sources = {
@@ -214,15 +278,26 @@ impl Runtime {
         self.mark_clean(node_id);
     }
 
+    /// Runs the given closure in the context of the provided observer.
+    ///
+    /// For the duration of the closure, `observer` will become the new
+    /// `observer` and `scope` as well.
     pub fn with_observer<Ret>(&self, observer: NodeId, func: impl FnOnce() -> Ret) -> Ret {
         let prev_observer = self.observer.take();
+        let prev_scope = self.scope.take();
+
         self.observer.set(Some(observer));
+        self.scope.set(Some(observer));
+
         let ret = func();
+
         self.observer.set(prev_observer);
+        self.scope.set(prev_scope);
+
         ret
     }
 
-    pub fn update(&self, node_id: NodeId) {
+    fn update(&self, node_id: NodeId) {
         let Some(node) = self.nodes.borrow().get(node_id).cloned() else {
             return;
         };
@@ -255,6 +330,11 @@ impl Runtime {
         }
     }
 
+    /// Tracks the given node as a source of the current observer (e.g. a signal
+    /// is tracked inside an effect).
+    ///
+    /// Since the mapping is bidirectional (there's `node_sources` and
+    /// `node_subscribers`), both maps will be updated.
     pub fn track(&self, node_id: NodeId) {
         let Some(observer) = self.observer.get() else {
             return;

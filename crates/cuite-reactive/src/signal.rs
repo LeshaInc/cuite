@@ -39,23 +39,16 @@ impl<T: 'static> Signal<T> {
     }
 
     pub fn with<Ret>(&self, func: impl FnOnce(&T) -> Ret) -> Ret {
-        with_runtime(|runtime| {
-            runtime.with_value(self.id, |value| {
-                let value = value.borrow();
-                let value = value.downcast_ref::<T>()?;
-                Some(func(value))
-            })
-        })
-        .unwrap()
+        self.track();
+        self.with_untracked(func)
     }
 
     pub fn with_untracked<Ret>(&self, func: impl FnOnce(&T) -> Ret) -> Ret {
         with_runtime(|runtime| {
-            runtime.with_value(self.id, |value| {
-                let value = value.borrow();
-                let value = value.downcast_ref::<T>()?;
-                Some(func(value))
-            })
+            let value = runtime.get_node_value(self.id)?;
+            let borrow = value.borrow();
+            let casted = borrow.downcast_ref::<T>()?;
+            Some(func(casted))
         })
         .unwrap()
     }
@@ -74,11 +67,12 @@ impl<T: 'static> Signal<T> {
 
     pub fn update<Ret>(&self, func: impl FnOnce(&mut T) -> Ret) -> Ret {
         with_runtime(|runtime| {
-            let ret = runtime.with_value(self.id, move |value| {
-                let mut value = value.borrow_mut();
-                let value = value.downcast_mut::<T>()?;
-                Some(func(value))
-            })?;
+            let ret = {
+                let value = runtime.get_node_value(self.id)?;
+                let mut borrow = value.borrow_mut();
+                let casted = borrow.downcast_mut::<T>()?;
+                func(casted)
+            };
 
             runtime.mark_descendants_dirty(self.id);
             runtime.run_effects();
@@ -90,11 +84,10 @@ impl<T: 'static> Signal<T> {
 
     pub fn update_untracked<Ret>(&self, func: impl FnOnce(&mut T) -> Ret) -> Ret {
         with_runtime(|runtime| {
-            runtime.with_value(self.id, move |value| {
-                let mut value = value.borrow_mut();
-                let value = value.downcast_mut::<T>()?;
-                Some(func(value))
-            })
+            let value = runtime.get_node_value(self.id)?;
+            let mut borrow = value.borrow_mut();
+            let casted = borrow.downcast_mut::<T>()?;
+            Some(func(casted))
         })
         .unwrap()
     }
