@@ -272,6 +272,7 @@ impl Runtime {
         }
 
         if self.node_state(node_id) >= NodeState::Dirty {
+            self.cleanup_children(node_id);
             self.update(node_id);
         }
 
@@ -348,6 +349,38 @@ impl Runtime {
         let mut sources = self.node_sources.borrow_mut();
         if let Some(sources) = sources.entry(observer) {
             sources.or_default().borrow_mut().insert(node_id);
+        }
+    }
+
+    fn cleanup_children(&self, node_id: NodeId) {
+        let mut children = self.node_children.borrow_mut();
+        let Some(children) = children.remove(node_id) else {
+            return;
+        };
+
+        for child in children.into_inner() {
+            self.cleanup_children(child);
+
+            let subscribers = self.node_subscribers.borrow_mut().remove(child);
+            if let Some(subscribers) = subscribers {
+                for sub in subscribers.into_inner() {
+                    if let Some(source) = self.node_sources.borrow_mut().get(sub) {
+                        source.borrow_mut().remove(&child);
+                    }
+                }
+            }
+
+            let sources = self.node_sources.borrow_mut().remove(child);
+            if let Some(sources) = sources {
+                for source in sources.into_inner() {
+                    if let Some(sub) = self.node_subscribers.borrow_mut().get(source) {
+                        sub.borrow_mut().remove(&child);
+                    }
+                }
+            }
+
+            self.node_parents.borrow_mut().remove(child);
+            self.nodes.borrow_mut().remove(child);
         }
     }
 }
