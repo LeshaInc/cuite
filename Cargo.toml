@@ -6,3 +6,4 @@ members = ["crates/*"]
 ahash = "0.8.11"
 self_cell = "1.0"
 slotmap = "1.0"
+ohm = { path = "../ohm/crates/ohm" }
