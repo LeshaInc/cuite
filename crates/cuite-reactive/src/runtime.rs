@@ -27,31 +27,31 @@ pub fn with_runtime<Ret>(func: impl FnOnce(&Runtime) -> Ret) -> Ret {
 #[derive(Default)]
 pub struct Runtime {
     /// Reactive nodes: signals, effects, scopes, etc
-    pub nodes: RefCell<SlotMap<NodeId, Node>>,
+    nodes: RefCell<SlotMap<NodeId, Node>>,
 
     /// Mapping between nodes and their subscribers.
     ///
     /// If node A is a subscriber of node B, then updates of B will also cause
     /// an update of A.
-    pub node_subscribers: RefCell<SecondaryMap<NodeId, RefCell<AHashSet<NodeId>>>>,
+    node_subscribers: RefCell<SecondaryMap<NodeId, RefCell<AHashSet<NodeId>>>>,
 
     /// Mapping between nodes and their sources, i.e. dependencies.
     ///
     /// If A is a subscriber of B, then B is a source of A, and vice versa.
-    pub node_sources: RefCell<SecondaryMap<NodeId, RefCell<AHashSet<NodeId>>>>,
+    node_sources: RefCell<SecondaryMap<NodeId, RefCell<AHashSet<NodeId>>>>,
 
     /// Mapping between nodes and their parent. When parent is disposed, all of
     /// the descendants in the hierarchy are also disposed.
-    pub node_parents: RefCell<SecondaryMap<NodeId, NodeId>>,
+    node_parents: RefCell<SecondaryMap<NodeId, NodeId>>,
 
     /// Mapping between nodes and their children.
     ///
     /// Reversed `node_parents` mapping.
-    pub node_children: RefCell<SecondaryMap<NodeId, RefCell<AHashSet<NodeId>>>>,
+    node_children: RefCell<SecondaryMap<NodeId, RefCell<AHashSet<NodeId>>>>,
 
     /// Current scope which will be implicitly assigned as a parent for all
     /// nodes created under it.
-    pub scope: Cell<Option<NodeId>>,
+    scope: Cell<Option<NodeId>>,
 
     /// Node that is currently being updated.
     ///
@@ -59,10 +59,10 @@ pub struct Runtime {
     /// that node will be added to the sources of the current observer. And vice
     /// versa: the observer will be added to the subscribers of the tracked
     /// node.
-    pub observer: Cell<Option<NodeId>>,
+    observer: Cell<Option<NodeId>>,
 
     /// List of effects scheduled to be run during `run_effects`
-    pub pending_effects: RefCell<Vec<NodeId>>,
+    pending_effects: RefCell<Vec<NodeId>>,
 }
 
 impl Runtime {
